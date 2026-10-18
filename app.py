@@ -1,3 +1,32 @@
+"""
+backend_server.py
+------------------------------------------------------------
+Seva ndogo (Flask) inayoshughulikia malipo halisi ya token
+ALFPay kwenye Pi Network Testnet.
+
+MUHIMU - USALAMA:
+1) Secret Key YA DISTRIBUTOR inasomwa kutoka "environment variable"
+   (ALFPAY_DISTRIBUTOR_SECRET), SI kuandikwa moja kwa moja hapa
+   kwenye code - hii inazuia isivuje kama utashiriki faili hili.
+2) Seva hii ndiyo PEKEE inayopaswa kujua Secret Key. Frontend
+   (HTML/JS) KAMWE haipaswi kuwa nayo.
+3) Endesha seva hii kwenye kompyuta/VPS yako mwenyewe, si kwenye
+   simu kama huduma ya umma, hadi uwe na HTTPS na ulinzi zaidi
+   (rate limiting, authentication ya kweli ya watumiaji, n.k.)
+4) Hii bado ni muundo wa awali (MVP) kwa ajili ya TESTNET pekee.
+------------------------------------------------------------
+
+JINSI YA KUENDESHA:
+  1) export ALFPAY_DISTRIBUTOR_SECRET="S...."   (Secret Key ya Stellar)
+     export ALFPAY_PI_API_KEY="..."             (Server API Key kutoka
+                                                   Pi Developer Portal ->
+                                                   App Configuration)
+  2) pip install flask flask-cors stellar-sdk requests
+  3) python3 backend_server.py
+  4) Seva itafanya kazi kwenye http://localhost:5000
+------------------------------------------------------------
+"""
+
 import os
 import json
 import time
@@ -9,17 +38,23 @@ from flask_cors import CORS
 from stellar_sdk import Keypair, Server, TransactionBuilder, Asset
 from stellar_sdk.exceptions import BadRequestError, NotFoundError
 
+# ============== MIPANGILIO ==============
 HORIZON_URL = "https://api.testnet.minepi.com"
 NETWORK_PASSPHRASE = "Pi Testnet"
 ASSET_CODE = "ALFPay"
 ISSUER_PUBLIC = "GBLEWO4ADHHZNEJGVOIVP47VYMAJJ4YWGH7LAO6ZT33VPOZ6ONREGMQO"
 
+# Pi Platform API - Server API Key (pata kwenye Pi Developer Portal -> 
+# App Configuration ya app yako -> API Key). Hii ni TOFAUTI na Secret
+# Key ya Stellar wallet - ni ya Pi Platform pekee, kwa ajili ya kuidhinisha
+# malipo ya Pi halisi.
 PI_API_KEY = os.environ.get("ALFPAY_PI_API_KEY")
 PI_PLATFORM_BASE = "https://api.minepi.com/v2"
 
 DISTRIBUTOR_SECRET = os.environ.get("ALFPAY_DISTRIBUTOR_SECRET")
 TX_LOG_FILE = Path("transactions_log.json")
 
+# Orodha rahisi ya bidhaa (badilisha/ongeza kadri unavyohitaji)
 PRODUCTS = [
     {"id": "p1", "name": "Bidhaa ya Mfano A", "price_pi": 1, "price_alfpay": 500},
     {"id": "p2", "name": "Bidhaa ya Mfano B", "price_pi": 3, "price_alfpay": 1500},
@@ -27,13 +62,14 @@ PRODUCTS = [
 ]
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Inaruhusu frontend (HTML) kuwasiliana na seva hii
 
 server = Server(horizon_url=HORIZON_URL)
 asset = Asset(ASSET_CODE, ISSUER_PUBLIC)
 
 
 def log_transaction(entry: dict):
+    """Hifadhi kumbukumbu rahisi ya miamala kwenye faili la JSON."""
     data = []
     if TX_LOG_FILE.exists():
         data = json.loads(TX_LOG_FILE.read_text())
@@ -42,6 +78,7 @@ def log_transaction(entry: dict):
 
 
 def get_dynamic_fee() -> int:
+    """Pata ada ya sasa ya mtandao, na ongeza kinga ya ziada."""
     try:
         base = server.fetch_base_fee()
     except Exception:
@@ -51,6 +88,7 @@ def get_dynamic_fee() -> int:
 
 @app.route("/api/balance", methods=["GET"])
 def balance():
+    """Angalia salio la ALFPay la Distributor wallet."""
     if not DISTRIBUTOR_SECRET:
         return jsonify({"error": "Server haijawekewa ALFPAY_DISTRIBUTOR_SECRET"}), 500
 
@@ -72,13 +110,22 @@ def balance():
 
 @app.route("/api/send", methods=["POST"])
 def send_payment():
+    """
+    Tuma ALFPay kutoka Distributor kwenda kwa mpokeaji mwingine.
+    Mwili wa ombi (JSON): { "to": "G...", "amount": "10", "memo": "hiari" }
+
+    KUMBUKA: Toleo hili ni la "custodial" - seva ndiyo inatuma kwa
+    niaba ya Distributor pekee. Kwa app halisi yenye watumiaji wengi,
+    kila mtumiaji angekuwa na wallet yake mwenyewe na kutia saini
+    muamala wake kupitia Pi SDK, si seva hii ikitumia funguo moja.
+    """
     if not DISTRIBUTOR_SECRET:
         return jsonify({"error": "Server haijawekewa ALFPAY_DISTRIBUTOR_SECRET"}), 500
 
     body = request.get_json(force=True) or {}
     to_address = body.get("to", "").strip()
     amount = body.get("amount")
-    memo = body.get("memo", "")[:28]
+    memo = body.get("memo", "")[:28]  # Stellar memo ina upeo wa herufi 28
 
     if not to_address or not amount:
         return jsonify({"error": "Tafadhali tuma 'to' na 'amount'"}), 400
@@ -130,11 +177,16 @@ def send_payment():
 
 @app.route("/api/products", methods=["GET"])
 def get_products():
+    """Rudisha orodha ya bidhaa, na bei kwa Pi na kwa ALFPay."""
     return jsonify(PRODUCTS)
 
 
 @app.route("/api/receiving-address", methods=["GET"])
 def receiving_address():
+    """
+    Anwani (Public Key) ambayo WATEJA wanapaswa kutuma ALFPay kwayo
+    wanapolipa bidhaa. Hii ni salama kushiriki - ni Public Key tu.
+    """
     if not DISTRIBUTOR_SECRET:
         return jsonify({"error": "Server haijawekewa ALFPAY_DISTRIBUTOR_SECRET"}), 500
     public_key = Keypair.from_secret(DISTRIBUTOR_SECRET).public_key
@@ -143,19 +195,30 @@ def receiving_address():
 
 @app.route("/api/verify-payment", methods=["POST"])
 def verify_payment():
+    """
+    Thibitisha kama mteja KWELI ametuma ALFPay kwa anwani yetu.
+    Mwili wa ombi: { "amount": "500", "memo": "ORDER-123" }
+
+    Inaangalia miamala ya hivi karibuni iliyoingia kwenye akaunti
+    ya Distributor kwenye Horizon, ikitafuta payment ya ALFPay
+    yenye kiasi na memo vinavyolingana. Hii ndiyo njia salama ya
+    "kuthibitisha malipo" bila kuhitaji Secret Key ya mteja.
+    """
     if not DISTRIBUTOR_SECRET:
         return jsonify({"error": "Server haijawekewa ALFPAY_DISTRIBUTOR_SECRET"}), 500
 
     body = request.get_json(force=True) or {}
-    expected_amount = str(body.get("amount", ""))
-    expected_memo = body.get("memo", "")
+    expected_memo = body.get("memo", "")  # hiari - Pi Wallet "Send" ya kawaida haina uwanja wa memo
 
-    if not expected_amount:
-        return jsonify({"error": "Tuma 'amount'"}), 400
+    try:
+        expected_amount = float(body.get("amount", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Tuma 'amount' sahihi"}), 400
 
     distributor_public = Keypair.from_secret(DISTRIBUTOR_SECRET).public_key
 
     try:
+        # Angalia miamala 20 ya hivi karibuni iliyoingia kwenye akaunti yetu
         payments = (
             server.payments()
             .for_account(distributor_public)
@@ -173,9 +236,14 @@ def verify_payment():
             continue
         if record.get("asset_code") != ASSET_CODE:
             continue
-        if record.get("amount") != expected_amount:
+        try:
+            record_amount = float(record.get("amount", "0"))
+        except (TypeError, ValueError):
+            continue
+        if abs(record_amount - expected_amount) > 0.0000001:
             continue
 
+        # Thibitisha muamala huu haujatumika tayari kwa oda nyingine
         tx_hash = record["transaction_hash"]
         already_used = False
         if TX_LOG_FILE.exists():
@@ -185,6 +253,9 @@ def verify_payment():
         if already_used:
             continue
 
+        # Kama memo ilitolewa na mteja, lazima ilingane. Pi Wallet "Send" ya
+        # kawaida haina uwanja wa memo kwa custom tokens, kwa hiyo kiasi + hali
+        # ya "haijatumika" ndiyo msingi wa uthibitisho pale memo haipo.
         if expected_memo:
             try:
                 tx = server.transactions().transaction(tx_hash).call()
@@ -209,6 +280,16 @@ def verify_payment():
 
     return jsonify({"success": False, "message": "Malipo hayajaonekana bado. Jaribu tena baada ya sekunde chache."})
 
+
+# ============== MALIPO YA PI HALISI (Pi Platform API) ==============
+# Mtiririko rasmi wa Pi SDK:
+#   1) Frontend: Pi.createPayment({...}) -> inapiga simu callback
+#      'onReadyForServerApproval(paymentId)'
+#   2) Frontend inatuma paymentId kwa seva hii -> /payments/approve
+#   3) Pi Wallet ya mtumiaji inathibitisha -> callback
+#      'onReadyForServerCompletion(paymentId, txid)'
+#   4) Frontend inatuma paymentId + txid kwa seva hii -> /payments/complete
+#   5) Seva hii ndipo inathibitisha malipo yamekamilika na kutoa bidhaa
 
 @app.route("/payments/approve", methods=["POST"])
 def approve_payment():
@@ -254,6 +335,8 @@ def complete_payment():
     if resp.status_code != 200:
         return jsonify({"error": "Imeshindwa kukamilisha malipo", "details": resp.text}), 400
 
+    # Hapa ndipo unapaswa "kutoa" bidhaa kwa mteja (mf. kubadilisha hali
+    # ya oda kwenye database yako kuwa "Imelipwa")
     log_transaction({
         "type": "pi_complete",
         "payment_id": payment_id,
@@ -265,6 +348,7 @@ def complete_payment():
 
 @app.route("/api/transactions", methods=["GET"])
 def get_transactions():
+    """Rudisha kumbukumbu za miamala zilizohifadhiwa na seva hii."""
     if TX_LOG_FILE.exists():
         return jsonify(json.loads(TX_LOG_FILE.read_text()))
     return jsonify([])
@@ -273,3 +357,10 @@ def get_transactions():
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({"status": "ALFPayment backend inafanya kazi", "asset": ASSET_CODE})
+
+
+if __name__ == "__main__":
+    if not DISTRIBUTOR_SECRET:
+        print("ONYO: ALFPAY_DISTRIBUTOR_SECRET haijawekwa - endesha kwanza:")
+        print('  export ALFPAY_DISTRIBUTOR_SECRET="S...."')
+    app.run(host="0.0.0.0", port=5000, debug=True)
